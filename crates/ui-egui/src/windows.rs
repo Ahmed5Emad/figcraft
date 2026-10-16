@@ -505,7 +505,7 @@ fn enter(app: &mut FigApp, id: u64) -> Option<Entered> {
 }
 
 /// Files the entered window opened are its own.
-fn adopt(app: &mut FigApp, e: &Entered) {
+fn adopt_entered(app: &mut FigApp, e: &Entered) {
     let new: Vec<u64> = app.session.docs.iter().map(|d| d.uid).filter(|u| *u > e.newest && app.windows.of(*u) == 0).collect();
     if let Some(w) = app.windows.list.iter_mut().find(|w| w.id == e.id) {
         w.docs.extend(new);
@@ -519,8 +519,8 @@ fn leave(app: &mut FigApp, mut e: Entered, outer: Option<egui::Rect>, inner: Opt
     exchange(app, &mut e.pane);
     if let Some(w) = app.windows.list.iter_mut().find(|w| w.id == e.id) {
         w.active = shown.or(w.active);
-        w.pos = outer.map(|r| r.min).or(w.pos);
-        w.size = inner.map_or(w.size, |r| r.size());
+        w.geo.pos = outer.map(|r| r.min).or(w.geo.pos);
+        w.geo.size = inner.map_or(w.geo.size, |r| r.size());
         w.pane = e.pane;
     }
     app.windows.current = 0;
@@ -538,7 +538,7 @@ pub(crate) fn as_window<R>(app: &mut FigApp, id: u64, f: impl FnOnce(&mut FigApp
     }
     let e = enter(app, id)?;
     let r = f(app);
-    adopt(app, &e);
+    adopt_entered(app, &e);
     leave(app, e, None, None);
     Some(r)
 }
@@ -556,7 +556,7 @@ fn draw(app: &mut FigApp, id: u64, ui: &mut egui::Ui) {
     app.logic(&ctx);
     // Within the swap, so a panic leaves every window its own state.
     guard(app, &ctx, |app| app.frame(ui));
-    adopt(app, &e);
+    adopt_entered(app, &e);
     settle(app, &ctx, files_before);
     if app.session.prefs != prefs {
         repaint_others(app, &ctx);
