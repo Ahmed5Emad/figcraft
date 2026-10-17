@@ -142,8 +142,8 @@ fn arrow(painter: &egui::Painter, pts: &[Pos2; 4], col: Color32) {
 /// Dashes around a rect's edge: the frame a chosen arrow comes from. Static on
 /// purpose: the canvas rests when idle.
 fn dashed_rect(painter: &egui::Painter, r: Rect, col: Color32) {
-    let (dash, gap) = (5.0, 4.0);
-    let stroke = Stroke::new(1.0, col);
+    let (dash, gap) = (10.0, 7.0);
+    let stroke = Stroke::new(1.2, col);
     let mut x = r.min.x;
     while x < r.max.x {
         let x1 = (x + dash).min(r.max.x);
