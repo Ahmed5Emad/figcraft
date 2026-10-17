@@ -142,17 +142,17 @@ fn arrow(painter: &egui::Painter, pts: &[Pos2; 4], col: Color32) {
 /// Dots around a rect's edge: the frame a chosen arrow comes from. Static on
 /// purpose: the canvas rests when idle.
 fn dotted_rect(painter: &egui::Painter, r: Rect, col: Color32) {
-    let step = 7.0;
+    let step = 5.0;
     let mut x = r.min.x;
     while x <= r.max.x {
-        painter.circle_filled(pos2(x, r.min.y), 1.8, col);
-        painter.circle_filled(pos2(x, r.max.y), 1.8, col);
+        painter.circle_filled(pos2(x, r.min.y), 1.0, col);
+        painter.circle_filled(pos2(x, r.max.y), 1.0, col);
         x += step;
     }
     let mut y = r.min.y + step;
     while y < r.max.y {
-        painter.circle_filled(pos2(r.min.x, y), 1.8, col);
-        painter.circle_filled(pos2(r.max.x, y), 1.8, col);
+        painter.circle_filled(pos2(r.min.x, y), 1.0, col);
+        painter.circle_filled(pos2(r.max.x, y), 1.0, col);
         y += step;
     }
 }
