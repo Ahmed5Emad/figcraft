@@ -268,9 +268,19 @@ pub fn input(app: &mut FigApp, ui: &egui::Ui, resp: &egui::Response) -> bool {
         .filter(|n| bezier_distance(&n.pts, pos) < 5.0)
         .min_by(|a, b| bezier_distance(&a.pts, pos).total_cmp(&bezier_distance(&b.pts, pos)));
     if let Some(n) = hit {
-        app.session.set_selection(vec![n.source]);
+        // The arrow carries the selection, not its source layer: nothing on the
+        // canvas or in the layers panel highlights, the editor opens for the arrow.
+        app.session.set_selection(vec![]);
         crate::proto_panel::open_editor(&ctx, Some((n.source, n.index)));
         return true;
+    }
+    // A press that hits neither a handle nor an arrow drops the arrow selection,
+    // unless it lands on the open editor's own layer (which keeps it, selected).
+    if pressed
+        && let Some((node, _)) = crate::proto_panel::editor(&ctx)
+        && screen_rect(app, &doc, node).is_none_or(|r| !r.contains(pos))
+    {
+        crate::proto_panel::open_editor(&ctx, None);
     }
     false
 }

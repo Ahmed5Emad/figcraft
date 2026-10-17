@@ -262,6 +262,20 @@ fn key_event(app: &mut FigApp, key: Key, physical: Option<Key>, m: Modifiers, re
         app.run("proto.interaction.remove", json!({"id": node, "index": index}));
         return true;
     }
+    // Escape with a prototype arrow selected closes it first (#767): the arrow carries
+    // the selection, so there may be nothing to deselect. Tool exits keep priority.
+    if key == Key::Escape && m.is_none() && !repeat
+        && app.ui.right_tab == RightTab::Prototype
+        && app.ui.present.is_none()
+        && crate::proto_panel::editor(ctx).is_some()
+        && app.session.tool.pen.is_none()
+        && !app.session.tool.busy()
+        && app.session.ds().is_ok_and(|d| d.selection.is_empty() && d.vector_edit.is_none() && d.text_edit.is_none())
+    {
+        crate::proto_panel::open_editor(ctx, None);
+        app.ui.context_menu = None;
+        return true;
+    }
     if let Some(b) = lookup(keymap::Context::Canvas, key, physical, m) {
         // Copy/cut/paste arrive as clipboard events on most platforms.
         if matches!(b.id, "edit.copy" | "edit.cut" | "edit.paste") {

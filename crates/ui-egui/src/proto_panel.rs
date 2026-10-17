@@ -268,6 +268,12 @@ pub fn prototype(app: &mut FigApp, ui: &mut Ui) {
     let doc = ds.doc.clone();
     let sel = ds.selection.clone();
     let page = ds.page;
+    // A selected arrow shows its own layer's sections, with nothing selected.
+    let sel = if sel.is_empty() {
+        editor(ui.ctx()).filter(|t| doc.node(t.0).is_some()).map(|(n, _)| vec![n]).unwrap_or_default()
+    } else {
+        sel
+    };
     if sel.is_empty() {
         open_editor(ui.ctx(), None);
         flows_overview(app, ui, &doc, page);
