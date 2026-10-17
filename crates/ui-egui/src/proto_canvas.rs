@@ -139,24 +139,21 @@ fn arrow(painter: &egui::Painter, pts: &[Pos2; 4], col: Color32) {
     painter.add(Shape::convex_polygon(vec![tip, tip - dir * 8.0 + n * 4.5, tip - dir * 8.0 - n * 4.5], col, Stroke::NONE));
 }
 
-/// Dashes around a rect's edge: the frame a chosen arrow comes from. Static on
+/// Dots around a rect's edge: the frame a chosen arrow comes from. Static on
 /// purpose: the canvas rests when idle.
-fn dashed_rect(painter: &egui::Painter, r: Rect, col: Color32) {
-    let (dash, gap) = (10.0, 7.0);
-    let stroke = Stroke::new(1.2, col);
+fn dotted_rect(painter: &egui::Painter, r: Rect, col: Color32) {
+    let step = 7.0;
     let mut x = r.min.x;
-    while x < r.max.x {
-        let x1 = (x + dash).min(r.max.x);
-        painter.line_segment([pos2(x, r.min.y), pos2(x1, r.min.y)], stroke);
-        painter.line_segment([pos2(x, r.max.y), pos2(x1, r.max.y)], stroke);
-        x += dash + gap;
+    while x <= r.max.x {
+        painter.circle_filled(pos2(x, r.min.y), 1.8, col);
+        painter.circle_filled(pos2(x, r.max.y), 1.8, col);
+        x += step;
     }
-    let mut y = r.min.y;
+    let mut y = r.min.y + step;
     while y < r.max.y {
-        let y1 = (y + dash).min(r.max.y);
-        painter.line_segment([pos2(r.min.x, y), pos2(r.min.x, y1)], stroke);
-        painter.line_segment([pos2(r.max.x, y), pos2(r.max.x, y1)], stroke);
-        y += dash + gap;
+        painter.circle_filled(pos2(r.min.x, y), 1.8, col);
+        painter.circle_filled(pos2(r.max.x, y), 1.8, col);
+        y += step;
     }
 }
 
@@ -200,11 +197,11 @@ pub fn draw(app: &FigApp, painter: &egui::Painter) {
         {
             painter.rect_stroke(r, CornerRadius::ZERO, Stroke::new(1.0, ACCENT.gamma_multiply(0.7)), StrokeKind::Outside);
         }
-        // Dashes around the frame the chosen arrow comes from.
+        // Dots around the frame the chosen arrow comes from.
         if is_open
             && let Some(r) = screen_rect(app, doc, nd.source)
         {
-            dashed_rect(painter, r, col);
+            dotted_rect(painter, r, col);
         }
         painter.add(egui::epaint::CubicBezierShape::from_points_stroke(nd.pts, false, Color32::TRANSPARENT, Stroke::new(w, col)));
         painter.circle_filled(nd.pts[0], 3.5, col);
