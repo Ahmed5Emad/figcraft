@@ -278,8 +278,10 @@ impl Session {
         let mut queue = std::mem::take(&mut self.restore.pending);
         let mut i = 0;
         while i < queue.len() {
-            let (session, window, front, after) =
-                { let p = &queue[i]; (p.session, p.window, p.front, p.after) };
+            let (session, window, front, after) = {
+                let p = &queue[i];
+                (p.session, p.window, p.front, p.after)
+            };
             let live = self.live.get(session).map(|l| (l.doc_uid, l.status.clone()));
             match live {
                 Some((Some(uid), _)) if self.docs.iter().any(|d| d.uid == uid) => {
