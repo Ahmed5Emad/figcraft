@@ -1,7 +1,7 @@
 //! The browser shell: web `Services` and the eframe web runner.
 
 use figcraft_engine::Session;
-use figcraft_ui_egui::{FigApp, Services};
+use figcraft_ui_egui::{ContentsFuture, FigApp, Services};
 use wasm_bindgen::JsCast as _;
 
 const CANVAS_ID: &str = "figcraft_canvas";
@@ -40,7 +40,13 @@ pub fn start() {
                     // on the socket wakes the page for a frame.
                     let ctx = cc.egui_ctx.clone();
                     session.live.install(Box::new(figcraft_collab_net::NetLink::new(std::sync::Arc::new(move || ctx.request_repaint()))));
-                    let fig = FigApp::new(session, Box::new(WebServices { reduce_motion }));
+                    let mut fig = FigApp::new(session, Box::new(WebServices { reduce_motion, ctx: cc.egui_ctx.clone() }));
+                    // `#join=<link>`: join that session, as opening an invite link does on the desktop.
+                    let hash = web_sys::window().and_then(|w| w.location().hash().ok()).unwrap_or_default();
+                    if let Some(link) = crate::query::join_link(&hash) {
+                        let link = js_sys::decode_uri_component(link).ok().and_then(|s| s.as_string()).unwrap_or_else(|| link.to_string());
+                        figcraft_ui_egui::live::open_invite(&mut fig, &link);
+                    }
                     Ok(Box::new(WebShell { fig }))
                 }),
             )
@@ -69,14 +75,46 @@ impl eframe::App for WebShell {
     }
 }
 
-/// Browser services. File dialogs return nothing for now (the trait's defaults); the clipboard
-/// goes through egui's own web clipboard handling.
+/// Browser services. Files are opened and imported through the browser's file picker, which hands
+/// over their contents (pickers that need a path return nothing, the trait's defaults); files are
+/// saved as downloads. Copies go to the system clipboard through egui's output; pastes arrive as
+/// paste events with their text (a page can't read the clipboard when it likes).
 struct WebServices {
     /// `prefers-reduced-motion: reduce` (it follows the setting while the page is open).
     reduce_motion: Option<web_sys::MediaQueryList>,
+    ctx: egui::Context,
 }
 
 impl Services for WebServices {
+    /// An `<input type="file">` taking `exts`, clicked; its file is read once picked.
+    fn pick_open_contents(&mut self, _title: &str, exts: &[&str]) -> Option<ContentsFuture> {
+        let accept = exts.iter().map(|e| format!(".{e}")).collect::<Vec<_>>().join(",");
+        Some(Box::pin(async move {
+            pick_file(&accept).await.unwrap_or_else(|e| {
+                log::error!("couldn't open a file: {e:?}");
+                None
+            })
+        }))
+    }
+    fn downloads(&self) -> bool {
+        true
+    }
+    /// A Blob behind a temporary `<a download>` link, clicked and removed.
+    fn download(&mut self, name: &str, bytes: &[u8]) -> bool {
+        match download(name, bytes) {
+            Ok(()) => true,
+            Err(e) => {
+                log::error!("couldn't download {name}: {e:?}");
+                false
+            }
+        }
+    }
+    fn clipboard_set_text(&mut self, s: &str) {
+        figcraft_ui_egui::egui_copy_text(&self.ctx, s);
+    }
+    fn clipboard_set_png(&mut self, w: u32, h: u32, rgba: &[u8]) {
+        figcraft_ui_egui::egui_copy_png(&self.ctx, w, h, rgba);
+    }
     fn open_url(&mut self, url: &str) {
         let Some(window) = web_sys::window() else { return };
         if let Err(e) = window.open_with_url_and_target(url, "_blank") {
@@ -108,3 +146,116 @@ impl Services for WebServices {
         held
     }
 }
+
+/// The file picked in the browser's file picker (`accept`: the extensions it offers), with its
+/// name; `None` when the picker is cancelled, `Some(Err)` with what to tell the user when the file
+/// can't be read.
+async fn pick_file(accept: &str) -> Result<Option<Result<(String, Vec<u8>), String>>, wasm_bindgen::JsValue> {
+    let window = web_sys::window().ok_or("no window")?;
+    let document = window.document().ok_or("no document")?;
+    let body = document.body().ok_or("no body")?;
+    let input: web_sys::HtmlInputElement = document.create_element("input")?.dyn_into()?;
+    input.set_type("file");
+    input.set_accept(accept);
+    input.set_hidden(true);
+    // Some browsers (older Safari) open the picker only for an input in the page.
+    body.append_child(&input)?;
+    let (closed, picker) = PickerClosed::new(&window, input.clone());
+    input.click();
+    let result = wasm_bindgen_futures::JsFuture::from(closed).await;
+    let file = input.files().and_then(|files| files.get(0));
+    drop(picker);
+    result?;
+    let Some(file) = file else { return Ok(None) };
+    let name = file.name();
+    if let Err(why) = figcraft_ui_egui::browser_can_read(&name, file.size()) {
+        return Ok(Some(Err(why)));
+    }
+    Ok(Some(match wasm_bindgen_futures::JsFuture::from(file.array_buffer()).await {
+        Ok(buffer) => Ok((name, js_sys::Uint8Array::new(&buffer).to_vec())),
+        Err(e) => {
+            log::error!("couldn't read {name}: {e:?}");
+            Err(figcraft_ui_egui::unreadable(&name))
+        }
+    }))
+}
+
+/// How long after the page gets focus back the file picker counts as closed (milliseconds): a
+/// picked file's `change` can come just after the focus, and must win. A `change` later than this
+/// (a slow cloud-backed file in a browser that never sends `cancel`) counts as a cancel.
+const PICKER_FOCUS_SETTLE_MS: i32 = 1_000;
+
+/// Settles a file picker's promise once: on `change` (a file was picked), on `cancel` (closed
+/// without one) or shortly after the page gets focus back, for browsers that never send `cancel`
+/// (Safari before 16.4), where the pick would otherwise stay pending and block every later one.
+/// Dropping it (also when the pick is abandoned) removes the input, the focus listener and its timer.
+struct PickerClosed {
+    window: web_sys::Window,
+    input: web_sys::HtmlInputElement,
+    _settle: wasm_bindgen::closure::Closure<dyn FnMut()>,
+    on_focus: wasm_bindgen::closure::Closure<dyn FnMut()>,
+    timer: std::rc::Rc<std::cell::Cell<Option<i32>>>,
+}
+
+impl PickerClosed {
+    fn new(window: &web_sys::Window, input: web_sys::HtmlInputElement) -> (js_sys::Promise, Self) {
+        let resolve = std::rc::Rc::new(std::cell::RefCell::new(None::<js_sys::Function>));
+        let slot = resolve.clone();
+        let closed = js_sys::Promise::new(&mut |res, _rej| *slot.borrow_mut() = Some(res));
+        let settle = wasm_bindgen::closure::Closure::<dyn FnMut()>::new(move || {
+            if let Some(res) = resolve.borrow_mut().take() {
+                let _ = res.call0(&wasm_bindgen::JsValue::NULL);
+            }
+        });
+        let _ = input.add_event_listener_with_callback("change", settle.as_ref().unchecked_ref());
+        let _ = input.add_event_listener_with_callback("cancel", settle.as_ref().unchecked_ref());
+        let timer = std::rc::Rc::new(std::cell::Cell::new(None));
+        let (w, t, f) = (window.clone(), timer.clone(), settle.as_ref().unchecked_ref::<js_sys::Function>().clone());
+        let on_focus = wasm_bindgen::closure::Closure::<dyn FnMut()>::new(move || {
+            if t.get().is_none() {
+                t.set(w.set_timeout_with_callback_and_timeout_and_arguments_0(&f, PICKER_FOCUS_SETTLE_MS).ok());
+            }
+        });
+        let _ = window.add_event_listener_with_callback("focus", on_focus.as_ref().unchecked_ref());
+        (closed, Self { window: window.clone(), input, _settle: settle, on_focus, timer })
+    }
+}
+
+impl Drop for PickerClosed {
+    fn drop(&mut self) {
+        if let Some(t) = self.timer.take() {
+            self.window.clear_timeout_with_handle(t);
+        }
+        let _ = self.window.remove_event_listener_with_callback("focus", self.on_focus.as_ref().unchecked_ref());
+        self.input.remove();
+    }
+}
+
+fn download(name: &str, bytes: &[u8]) -> Result<(), wasm_bindgen::JsValue> {
+    let window = web_sys::window().ok_or("no window")?;
+    let document = window.document().ok_or("no document")?;
+    let body = document.body().ok_or("no body")?;
+    let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(bytes));
+    let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &{
+        let o = web_sys::BlobPropertyBag::new();
+        o.set_type("application/octet-stream");
+        o
+    })?;
+    let url = web_sys::Url::create_object_url_with_blob(&blob)?;
+    let a: web_sys::HtmlAnchorElement = document.create_element("a")?.dyn_into()?;
+    a.set_href(&url);
+    a.set_download(name);
+    body.append_child(&a)?;
+    a.click();
+    a.remove();
+    // Revoked later, not at once: some browsers cancel a download whose URL goes before it starts.
+    let revoke = wasm_bindgen::closure::Closure::once_into_js(move || {
+        let _ = web_sys::Url::revoke_object_url(&url);
+    });
+    // Without the timer the URL just stays until the page closes.
+    let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(revoke.unchecked_ref(), REVOKE_DOWNLOAD_MS);
+    Ok(())
+}
+
+/// How long a download's object URL is kept (milliseconds).
+const REVOKE_DOWNLOAD_MS: i32 = 40_000;

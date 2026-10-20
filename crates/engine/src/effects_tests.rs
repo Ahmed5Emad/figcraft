@@ -51,6 +51,32 @@ fn effect_set_edits_noise_texture_and_glass() {
     assert!(s.execute("effect.set", &json!({"ids": [r], "index": 0, "effect": {"type": "glass", "depth": "deep"}})).is_err());
 }
 
+/// A key an effect doesn't have is refused, naming what it takes: serde dropped it without a word,
+/// so a shadow given `offsetX`/`offsetY` (the names variable bindings use) kept the default offset.
+#[test]
+fn effects_refuse_keys_they_dont_have() {
+    let mut s = Session::new();
+    let r = rect(&mut s);
+    let shadow = json!({"type": "dropShadow", "color": "#00000040", "offsetX": 0, "offsetY": 1, "radius": 3});
+    let err = s.execute("node.set", &json!({"ids": [r], "props": {"effects": [shadow]}})).unwrap_err().to_string();
+    assert!(err.contains("effects[0]") && err.contains("offsetX, offsetY") && err.contains("offset"), "{err}");
+    assert!(s.doc().unwrap().node(r).unwrap().effects.is_empty(), "nothing stored");
+    let err = s.execute("effect.add", &json!({"ids": [r], "effect": {"type": "layerBlur", "radious": 8}})).unwrap_err().to_string();
+    assert!(err.contains("radious"), "{err}");
+    s.execute("effect.add", &json!({"ids": [r], "type": "dropShadow"})).unwrap();
+    let err = s.execute("effect.set", &json!({"ids": [r], "index": 0, "effect": {"type": "dropShadow", "spred": 2}})).unwrap_err().to_string();
+    assert!(err.contains("spred"), "{err}");
+    // Every kind's own keys still go in, camelCase or snake_case, and so does what inspect reports.
+    for ty in ["innerShadow", "layerBlur", "backgroundBlur", "noise", "texture", "glass"] {
+        s.execute("effect.add", &json!({"ids": [r], "type": ty})).unwrap();
+    }
+    let reported = crate::inspect::node_json(s.doc().unwrap(), r, 0)["effects"].clone();
+    s.execute("node.set", &json!({"ids": [r], "props": {"effects": reported}})).unwrap();
+    let camel = json!({"type": "dropShadow", "offset": [0, 1], "showBehind": true, "visible": true});
+    let snake = json!({"type": "innerShadow", "offset": [0, 1], "show_behind": false});
+    s.execute("node.set", &json!({"ids": [r], "props": {"effects": [camel, snake]}})).unwrap();
+}
+
 #[test]
 fn scaling_scales_grain_and_glass() {
     let mut s = Session::new();
@@ -84,4 +110,25 @@ fn inspect_and_css_show_the_new_effects() {
     assert!(fx.rows[2].value.contains("refraction 80%"), "{}", fx.rows[2].value);
     let css = code_for(doc, r, CodeLang::Css);
     assert!(css.contains("backdrop-filter: blur(2px);"), "{css}");
+}
+
+#[test]
+fn negative_or_fractional_index_is_refused_not_item_zero() {
+    let mut s = Session::new();
+    let r = rect(&mut s);
+    s.execute("effect.add", &json!({"ids": [r], "type": "layerBlur"})).unwrap();
+    s.execute("export.add", &json!({"ids": [r]})).unwrap();
+    s.execute("export.add", &json!({"ids": [r]})).unwrap();
+    let before = s.doc().unwrap().node(r).unwrap().clone();
+    assert_eq!(before.exports.len(), 2);
+    for index in [json!(-1), json!(-0.5), json!(1.5)] {
+        let set = json!({"ids": [r], "index": index, "effect": {"type": "dropShadow"}});
+        assert!(s.execute("effect.set", &set).is_err(), "effect.set index {index}");
+        let upd = json!({"ids": [r], "index": index, "format": "svg"});
+        assert!(s.execute("export.update", &upd).is_err(), "export.update index {index}");
+        assert!(s.execute("export.remove", &json!({"ids": [r], "index": index})).is_err(), "export.remove index {index}");
+        let n = s.doc().unwrap().node(r).unwrap();
+        assert_eq!(n.effects, before.effects, "index {index}");
+        assert_eq!(n.exports, before.exports, "index {index}");
+    }
 }

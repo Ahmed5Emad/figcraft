@@ -17,6 +17,23 @@ fn css_parsing() {
     assert_eq!(Color::parse_css("rgba(0 0 255 / 50%)").unwrap().to_rgba8(), [0, 0, 255, 128]);
     assert_eq!(Color::parse_css("hsl(120, 100%, 50%)").unwrap().to_hex(), "00FF00");
     assert_eq!(Color::parse_css("white").unwrap(), Color::WHITE);
+    assert_eq!(Color::parse_css("RebeccaPurple").unwrap().to_hex(), "663399");
+    assert_eq!(Color::parse_css("transparent").unwrap(), Color::TRANSPARENT);
+}
+
+#[test]
+fn colour_fields_take_names() {
+    assert_eq!(Color::from_hex_or_name("red").unwrap().to_css_hex(), "#FF0000");
+    assert_eq!(Color::from_hex_or_name(" Cornflower Blue ").unwrap().to_hex(), "6495ED");
+    assert_eq!(Color::from_hex_or_name("darkblue").unwrap().to_rgba8(), [0, 0, 139, 255]);
+    // Hex wins: every digit string still reads as hex.
+    assert_eq!(Color::from_hex_or_name("abc").unwrap().to_hex(), "AABBCC");
+    assert_eq!(Color::from_hex_or_name("#0D99FF").unwrap().to_hex(), "0D99FF");
+    // Names are opaque; `transparent` is not a field colour.
+    assert!(Color::from_hex_or_name("transparent").is_none());
+    for junk in ["", "#", "redd", "re d d", "12345", "\u{0}", "🟥", &"x".repeat(100_000)] {
+        assert!(Color::from_hex_or_name(junk).is_none(), "{junk:?}");
+    }
 }
 
 #[test]
@@ -63,7 +80,7 @@ fn blend_names() {
 #[test]
 fn nan_inputs_are_sanitized() {
     let c = Color::new(f32::NAN, 2.0, -1.0, f32::INFINITY);
-    assert_eq!(c.to_rgba8(), [0, 255, 0, 0]);
+    assert_eq!(c.to_rgba8(), [0, 255, 0, 255]);
 }
 
 #[test]
@@ -88,4 +105,12 @@ fn crop_defaults_to_fill_and_roundtrips() {
     for (a, b) in back.iter().zip(c.iter()) {
         assert!((a - b).abs() < 1e-9);
     }
+}
+
+#[test]
+fn infinite_channels_clamp() {
+    let c = Color::parse_css("rgb(1e40, 0, 0)").unwrap();
+    assert_eq!(c.r, 1.0);
+    let c = Color::new(f32::INFINITY, f32::NEG_INFINITY, f32::NAN, f32::INFINITY);
+    assert_eq!((c.r, c.g, c.b, c.a), (1.0, 0.0, 0.0, 1.0));
 }

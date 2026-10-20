@@ -95,13 +95,17 @@ examples from `packaging/server/` (systemd unit, Caddyfile, nginx; the Dockerfil
 the sources). Linux only for now; elsewhere operators build it with
 `cargo build --release -p figcraft-server`.
 
-**Fonts.** Every build job checks out [craft-fonts](https://github.com/storytold/craft-fonts) at
-`CRAFT_FONTS_REF` (top of `release.yml`) and builds with `CRAFT_FONTS_DIR` and
-`CRAFT_FONTS_REQUIRED=1`, so releases embed its fonts and fail rather than ship without them.
+**Fonts.** Every build job, the web one included (`web-craft-fonts`), checks out
+[craft-fonts](https://github.com/storytold/craft-fonts) at `craft-fonts-ref` (in `release.yml`) and
+builds with `CRAFT_FONTS_DIR` and `CRAFT_FONTS_REQUIRED=1`, so releases embed its fonts and fail
+rather than ship without them. The browser has no system fonts, so a web build without craft-fonts
+can't draw text.
 `crates/text/build.rs` reads both `fonts/manifest.txt` and `fonts/latin-manifest.txt`, so the pin
 must be a commit that has the Latin manifest (today `4391305`, on craft-fonts'
-`pr/latin-presentation-fonts` branch; re-pin to `main` once that lands). The web build embeds
-only Inter. Packages carry each embedded font's licence as `OFL-<family>.txt`
+`pr/latin-presentation-fonts` branch; re-pin to `main` once that lands). That commit has no
+Noto Sans Georgian (craft-fonts' main has it but no Latin manifest), so desktop Georgian uses an
+installed font; re-pin when one commit has both (craft-fonts#42). The web build embeds only Inter,
+Noto Sans Georgian and the Archivo SemiBold wordmark, when the pin has them. Packages carry each embedded font's licence as `OFL-<family>.txt`
 (`copy_font_licences` in `packaging/env.sh`; `Contents/Resources/Licenses` in the macOS app).
 
 ### macOS
@@ -148,7 +152,8 @@ shared-mime-info file for `.figcraft`) and builds every format from it: `.tar.gz
 `.rpm` with [nfpm](https://nfpm.goreleaser.com/) (`nfpm.yaml` lists the dlopen'd runtime
 libraries as dependencies); and an `.AppImage` with update information and a `.zsync`, whose
 `AppRun` registers the desktop entry and icons on launch so Wayland docks show the right icon
-(`FIGCRAFT_NO_DESKTOP_INTEGRATION=1` opts out; covered by `apprun-test.sh`).
+(`FIGCRAFT_NO_DESKTOP_INTEGRATION=1` opts out; covered by `apprun-test.sh`) and runs the bundled
+`figcraft-cli` for `FigCraft.AppImage cli <args>`.
 `flatpak-bundle.sh` repackages the tarball into a `.flatpak` with
 `flatpak/ai.storyteller.figcraft.bundle.yml` (freedesktop 26.08). `flatpak/ai.storyteller.figcraft.yml`
 is the from-source manifest for a Flathub submission (not built in CI; vendor crates with

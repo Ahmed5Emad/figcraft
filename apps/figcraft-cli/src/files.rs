@@ -29,16 +29,27 @@ fn image_format(e: &str) -> Option<ExportFormat> {
     }
 }
 
+/// Writes through [`figcraft_engine::file_access`] when automation roots are in force, so a
+/// confined run can only write inside a write root (#833).
+///
+/// Unconfined it writes with `std::fs::write`, as it always did. `file_access::write` stages the
+/// bytes and renames them into place, which **replaces** a symbolic link at `path` instead of
+/// writing through it to its target -- a change of behaviour for anyone whose output path is a
+/// link, and nothing to do with confinement. Inside a root the staged write is the right one:
+/// `Roots::check` has already refused a link that leads out of the root.
 fn write(path: &str, bytes: &[u8]) -> CliResult<()> {
     if let Some(dir) = Path::new(path).parent().filter(|d| !d.as_os_str().is_empty()) {
-        std::fs::create_dir_all(dir).map_err(|e| CliError::Failed(format!("{}: {e}", dir.display())))?;
+        figcraft_engine::file_access::create_dir_all(dir).map_err(|e| CliError::Failed(e.to_string()))?;
+    }
+    if figcraft_engine::file_access::current().is_some() {
+        return figcraft_engine::file_access::write(path, bytes).map_err(|e| CliError::Failed(e.to_string()));
     }
     std::fs::write(path, bytes).map_err(|e| CliError::Failed(format!("{path}: {e}")))
 }
 
 fn page_named(doc: &Document, name: Option<&str>) -> CliResult<NodeId> {
     match name {
-        None => doc.first_page().ok_or_else(|| CliError::Failed("the document has no pages".into())),
+        None => doc.first_open_page().or_else(|| doc.first_page()).ok_or_else(|| CliError::Failed("the document has no pages".into())),
         Some(n) => doc
             .pages
             .iter()
@@ -102,8 +113,8 @@ pub fn write_doc(doc: &Document, page: NodeId, out: &str) -> CliResult<()> {
             let v = figcraft_format::to_json(doc).map_err(|e| CliError::Failed(e.to_string()))?;
             serde_json::to_vec_pretty(&v).map_err(|e| CliError::Failed(e.to_string()))?
         }
-        "svg" => figcraft_svg::export_svg(&doc.in_srgb(), &children(doc, page), &Default::default())
-            .ok_or_else(|| CliError::Failed("the page is empty: nothing to export".into()))?
+        "svg" => figcraft_svg::try_export_svg(&doc.in_srgb(), &children(doc, page), &Default::default())
+            .map_err(|e| CliError::Failed(e.to_string()))?
             .into_bytes(),
         "png" | "jpg" | "jpeg" | "webp" => encode(doc, &render_page(doc, page, 1.0)?, &e)?,
         "pdf" => page_pdf(doc, page, &PrintSettings::default())?,
@@ -155,6 +166,7 @@ pub fn info(path: &str, as_json: bool) -> CliResult<ExitCode> {
             Some(json!({"id": p, "name": pn.name, "nodes": nodes, "topLevel": pn.children.len(), "frames": frames}))
         })
         .collect();
+    let missing = figcraft_engine::fonts::missing(&doc);
     let v = json!({
         "file": path,
         "name": doc.name,
@@ -164,6 +176,7 @@ pub fn info(path: &str, as_json: bool) -> CliResult<ExitCode> {
         "variables": doc.variables.variables.len(),
         "images": doc.images.len(),
         "notes": notes,
+        "missingFonts": missing.iter().map(|m| json!({"family": m.family, "layers": m.layers})).collect::<Vec<_>>(),
     });
     if as_json {
         println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
@@ -186,6 +199,10 @@ pub fn info(path: &str, as_json: bool) -> CliResult<ExitCode> {
         for f in p["frames"].as_array().into_iter().flatten() {
             println!("  {} {} \"{}\" {}×{}", f["id"], f["type"].as_str().unwrap_or(""), f["name"].as_str().unwrap_or(""), f["width"], f["height"]);
         }
+    }
+    for m in &missing {
+        let layers = if m.layers == 1 { "text layer" } else { "text layers" };
+        println!("missing font \"{}\": {} {layers} (drawn in a fallback font)", m.family, m.layers);
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -238,7 +255,7 @@ pub fn export(file: &str, out: &str, t: &Target) -> CliResult<ExitCode> {
         println!("{out}");
         return Ok(ExitCode::SUCCESS);
     }
-    std::fs::create_dir_all(out).map_err(|e| CliError::Failed(format!("{out}: {e}")))?;
+    figcraft_engine::file_access::create_dir_all(out).map_err(|e| CliError::Failed(e.to_string()))?;
     let ids = match target {
         Some(t) => vec![t],
         None => {
@@ -323,7 +340,8 @@ pub fn parse_script(text: &str) -> Result<Vec<(String, Value)>, String> {
 }
 
 pub fn run_script(script: &str, input: Option<&str>, out: Option<&str>) -> CliResult<ExitCode> {
-    let text = std::fs::read_to_string(script).map_err(|e| CliError::Failed(format!("{script}: {e}")))?;
+    let bytes = figcraft_engine::file_access::read(script).map_err(|e| CliError::Failed(e.to_string()))?;
+    let text = String::from_utf8(bytes).map_err(|_| CliError::Failed(format!("{script}: not UTF-8")))?;
     let steps = parse_script(&text).map_err(|e| CliError::Failed(format!("{script}: {e}")))?;
     let mut s = match input {
         Some(path) => {
@@ -333,17 +351,32 @@ pub fn run_script(script: &str, input: Option<&str>, out: Option<&str>) -> CliRe
         }
         None => Session::new(),
     };
-    for (i, (cmd, params)) in steps.iter().enumerate() {
-        let r = s.execute(cmd, params);
-        s.ui_requests.clear();
-        match r {
-            Ok(v) => println!("{}", json!({"step": i, "command": cmd, "ok": true, "result": v})),
-            Err(e) => {
-                println!("{}", json!({"step": i, "command": cmd, "ok": false, "error": e.to_string()}));
-                eprintln!("error: step {i} ({cmd}) failed: {e}");
-                return Ok(ExitCode::from(1));
-            }
+    // One undo step and all-or-nothing, the way the same commands behave through `command.batch`
+    // (MCP, the control channel, plugins): `{"$step": n}` resolves against the steps before it, and
+    // a step that fails takes the whole script back instead of leaving the earlier steps applied.
+    // The result lines are held back until the script is through, so none of them reports work that
+    // was rolled back.
+    let mut results: Vec<Value> = Vec::with_capacity(steps.len());
+    let mut failed_at = 0;
+    let outcome = s.grouped(&format!("run {script}"), |s| {
+        for (i, (cmd, params)) in steps.iter().enumerate() {
+            failed_at = i;
+            let v = s.batch_step(&results, i, cmd, params)?;
+            s.ui_requests.clear();
+            results.push(v);
         }
+        Ok(())
+    });
+    if let Err(e) = outcome {
+        let cmd = steps.get(failed_at).map_or("", |(cmd, _)| cmd.as_str());
+        let i = failed_at;
+        println!("{}", json!({"step": i, "command": cmd, "ok": false, "error": e.to_string(), "rolledBack": true}));
+        eprintln!("error: step {i} ({cmd}) failed: {e}");
+        eprintln!("the script's document changes were rolled back");
+        return Ok(ExitCode::from(1));
+    }
+    for (i, ((cmd, _), v)) in steps.iter().zip(&results).enumerate() {
+        println!("{}", json!({"step": i, "command": cmd, "ok": true, "result": v}));
     }
     if let Some(out) = out {
         let ds = s.ds().map_err(|e| CliError::Failed(e.to_string()))?;
@@ -378,5 +411,106 @@ mod tests {
         assert_eq!(sanitize("Home / Hero"), "Home _ Hero");
         assert_eq!(sanitize("../.."), "_");
         assert_eq!(sanitize(""), "layer");
+    }
+
+    #[test]
+    fn default_page_skips_leading_divider() {
+        let mut doc = Document::new("divider");
+        let page = doc.first_page().unwrap();
+        doc.create(page, figcraft_doc::NodeKind::Frame, "First", 0.0, 0.0, 40.0, 30.0).unwrap();
+        let divider = doc.add_page("- Divider");
+        doc.pages.retain(|p| *p != divider);
+        doc.pages.insert(0, divider);
+        assert!(doc.is_divider(divider));
+        assert_eq!(page_named(&doc, None).unwrap(), page);
+        assert_eq!(page_named(&doc, Some("- Divider")).unwrap(), divider);
+        let pm = render_page(&doc, page_named(&doc, None).unwrap(), 1.0).unwrap();
+        assert_eq!((pm.width(), pm.height()), (40, 30));
+        assert!(render_page(&doc, divider, 1.0).is_err());
+    }
+
+    #[test]
+    fn export_depth_errors_preserve_conversion_destinations() {
+        let mut doc = Document::new("export depth");
+        let page = doc.first_page().unwrap();
+        let root = doc.create(page, figcraft_doc::NodeKind::Frame, "root", 0.0, 0.0, 32.0, 32.0).unwrap();
+        let mut parent = root;
+        for _ in 1..257 {
+            parent = doc.create(parent, figcraft_doc::NodeKind::Group, "group", 0.0, 0.0, 32.0, 32.0).unwrap();
+        }
+        doc.create(parent, figcraft_doc::NodeKind::Rectangle, "leaf", 0.0, 0.0, 8.0, 8.0).unwrap();
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("figcraft-cli-export-depth-{}-{stamp}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        for ext in ["svg", "pdf"] {
+            let path = dir.join(format!("previous.{ext}"));
+            std::fs::write(&path, b"previous export").unwrap();
+            let CliError::Failed(error) = write_doc(&doc, page, path.to_str().unwrap()).unwrap_err() else {
+                panic!("depth overflow must be an operation failure");
+            };
+            assert!(error.contains("maximum export depth of 256"), "{ext}: {error}");
+            assert!(error.contains("select an inner layer"), "{ext}: {error}");
+            assert_eq!(std::fs::read(&path).unwrap(), b"previous export");
+        }
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("figcraft-cli-{tag}-{}-{stamp}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        dir
+    }
+
+    /// A script resolves `{"$step": n}` like the same commands through `command.batch`. Each step
+    /// used to run on its own, so the reference reached `parent` unresolved, `node.create` read it
+    /// as "no parent" and the layer landed on the page — with every step reporting success.
+    #[test]
+    fn a_script_puts_a_layer_in_a_layer_an_earlier_step_made() {
+        let dir = temp_dir("run-step");
+        let script = dir.join("script.json");
+        std::fs::write(
+            &script,
+            r#"[
+                {"command": "node.create", "params": {"type": "frame", "name": "Card", "x": 0, "y": 0, "width": 200, "height": 100}},
+                {"command": "node.create", "params": {"type": "rectangle", "name": "child", "parent": {"$step": 0}, "x": 10, "y": 10, "width": 20, "height": 20}}
+            ]"#,
+        )
+        .unwrap();
+        let out = dir.join("out.figcraft");
+        run_script(script.to_str().unwrap(), None, Some(out.to_str().unwrap())).unwrap();
+
+        let mut s = Session::empty();
+        s.execute("file.open", &json!({"path": out.to_str().unwrap()})).unwrap();
+        let doc = s.doc().unwrap();
+        let page = s.page().unwrap();
+        let top = doc.node(page).unwrap().children.clone();
+        assert_eq!(top.len(), 1, "only the frame is top level, not the rectangle too");
+        assert_eq!(doc.node(top[0]).unwrap().name, "Card");
+        let inner = doc.node(top[0]).unwrap().children.clone();
+        assert_eq!(inner.len(), 1, "the rectangle went inside the frame");
+        assert_eq!(doc.node(inner[0]).unwrap().name, "child");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A step that fails takes the whole script back: nothing is written, and the failure says so.
+    #[test]
+    fn a_failed_step_leaves_no_output() {
+        let dir = temp_dir("run-rollback");
+        let script = dir.join("script.json");
+        std::fs::write(
+            &script,
+            r#"[
+                {"command": "node.create", "params": {"type": "frame", "name": "Card", "x": 0, "y": 0, "width": 200, "height": 100}},
+                {"command": "node.set", "params": {"ids": [99999], "props": {"name": "nope"}}}
+            ]"#,
+        )
+        .unwrap();
+        let out = dir.join("out.figcraft");
+        // The failure is the script's, not the call's: the CLI reports it and exits non-zero.
+        run_script(script.to_str().unwrap(), None, Some(out.to_str().unwrap())).unwrap();
+        assert!(!out.exists(), "a script that failed writes nothing");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

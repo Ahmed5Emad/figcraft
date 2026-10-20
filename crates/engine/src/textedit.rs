@@ -53,16 +53,17 @@ pub fn end(s: &mut Session) -> Result<()> {
         let _ = doc.remove(te.id);
         s.ds_mut()?.selection.clear();
     }
-    s.commit_interaction()?;
     if empty && te.created {
-        // Nothing to undo for a text box that was never filled.
+        // Nothing to undo for a text box that was never filled. The gesture snapshot was taken
+        // after the layer was added, so it still holds it: re-base it on the document without the
+        // layer, and committing then records no step (and leaves the redo stack alone).
         let ds = s.ds_mut()?;
-        if let Some(last) = ds.history.undo.last()
-            && *last.doc == *ds.doc
-        {
-            ds.history.undo.pop();
+        let doc = ds.doc.clone();
+        if let Some(it) = ds.interaction.as_mut() {
+            it.doc = doc;
         }
     }
+    s.commit_interaction()?;
     let ds = s.ds_mut()?;
     ds.revision += 1;
     Ok(())
@@ -97,12 +98,7 @@ fn edit(s: &mut Session, f: impl FnOnce(&mut TextData, &mut TextEdit)) -> Result
 /// Type (or paste) `text` replacing the selection. Line endings are normalised and other control
 /// characters dropped, so pasted plain text from any platform lands cleanly.
 pub fn insert(s: &mut Session, text: &str) -> Result<()> {
-    let text: String = text
-        .replace("\r\n", "\n")
-        .replace(['\r', '\u{2028}', '\u{2029}'], "\n")
-        .chars()
-        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
-        .collect();
+    let text: String = crate::cmd::props::normalize_line_endings(text).chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')).collect();
     // A widget's editable text takes what its plugin allows: one line unless it's multiline, and
     // no more characters than its maximum.
     let input = s.ds()?.text_edit.as_ref().and_then(|te| crate::widgets::input_of(&s.ds().ok()?.doc, te.id));
@@ -172,9 +168,15 @@ fn list_key(s: &mut Session, key: &str, shift: bool) -> Result<bool> {
 }
 
 /// Cmd/Ctrl+] and Cmd/Ctrl+[ while editing: the selected list items a level deeper or out, like
-/// Tab and Shift+Tab. Returns whether anything changed (text that isn't a list stays as it is).
+/// Tab and Shift+Tab. Returns whether anything changed (text that isn't a list and items already
+/// at the deepest level stay as they are).
 pub fn list_indent(s: &mut Session, out: bool) -> Result<bool> {
-    list_key(s, "Tab", out)
+    let Some(id) = s.ds()?.text_edit.as_ref().map(|te| te.id) else { return Ok(false) };
+    let before = text_of(s, id)?;
+    if !list_key(s, "Tab", out)? {
+        return Ok(false);
+    }
+    Ok(text_of(s, id)? != before)
 }
 
 /// The kind of word char `i` belongs to: 0 for spaces and punctuation, else its script, so a word
@@ -811,6 +813,7 @@ mod tests {
         assert!(r.is_null() || r["axes"].is_array());
     }
 
+    /// No text command panics on junk parameters while a text is being edited.
     #[test]
     fn text_commands_survive_junk_while_editing() {
         let junk = [
@@ -822,7 +825,8 @@ mod tests {
             json!({"variations": {"wght": "heavy", "toolong": 1}, "text": "\u{0}\u{7}", "cursor": 1e300}),
             json!({"variations": {"wght": 1e300, "opsz": -1e300}, "replace": "yes", "text": "日本語", "cursor": -1}),
         ];
-        for spec in crate::cmd::all_commands().iter().filter(|c| c.id.starts_with("text.")) {
+        // `text.rescanFonts` takes no params and walks the font folders: one walk per junk is slow.
+        for spec in crate::cmd::all_commands().iter().filter(|c| c.id.starts_with("text.") && c.id != "text.rescanFonts") {
             for j in &junk {
                 let (mut s, id) = setup("Hi there\nyou");
                 begin(&mut s, id, Some(2), false).unwrap();

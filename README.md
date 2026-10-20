@@ -10,7 +10,7 @@
 <h1 align="center">FigCraft</h1>
 
 <p align="center">
-  <b>Interface design; an open-source, clean-room reimplementation of Figma, rebuilt in pure Rust.</b><br>
+  <b>Interface design and prototyping: open source, collaborative and built in pure Rust.</b><br>
   Frames, auto layout, components and variants, vector networks, styles, variables and prototypes,<br>
   in a native app that opens instantly and works offline. Open source, and yours.
 </p>
@@ -62,7 +62,7 @@
   <tr>
     <td width="25%" valign="top">
       <h3>🎛️ Familiar by design</h3>
-      The toolbar, layers panel, Design panel, menus and shortcuts sit where your hands expect them. If you know Figma, you already know FigCraft.
+      The toolbar, layers panel, Design panel, menus and shortcuts sit right where your hands expect them.
     </td>
     <td width="25%" valign="top">
       <h3>⚡ Native and fast</h3>
@@ -191,7 +191,7 @@ exposes to agents, and exported at 2x by FigCraft's own renderer. The source fil
     </td>
     <td width="50%" valign="top">
       <h3>Prototype and hand off</h3>
-      Connections, triggers, actions and Smart Animate-style transitions, variables with conditionals (if / else if / else built in the interaction editor, expressions like <code>count + 1</code>), flows, a presentation view with device frames, hotspot hints and an Inspect panel, and a live preview pane. Alt to measure distances and padding on the canvas, Inspect mode with measurements, annotations in colour-coded categories, a ready-for-dev list with a focus view and Compare changes (before / after with property-level diffs since a frame was marked ready), and code (CSS, HTML, React, SwiftUI, Compose) where components take their properties as parameters, comment threads pinned to frames (replies, @mentions, reactions, read state) and named version history. Export any layer at any scale to PNG, JPG, WebP, SVG or PDF.
+      Connections, triggers, actions and Smart Animate-style transitions, variables with conditionals (if / else if / else built in the interaction editor, expressions like <code>count + 1</code>), flows, a presentation view with device frames, hotspot hints and an Inspect panel, and a live preview pane. Alt to measure distances and padding on the canvas, Inspect mode with measurements, annotations in colour-coded categories, a ready-for-dev list with a focus view and Compare changes (before / after with property-level diffs since a frame was marked ready), and code (CSS, HTML, React, Leptos, SwiftUI, Compose) where components take their properties as parameters, comment threads pinned to frames (replies, @mentions, reactions, read state) and named version history. Export any layer at any scale to PNG, JPG, WebP, SVG or PDF.
     </td>
   </tr>
 </table>
@@ -227,8 +227,8 @@ The desktop app also offers a loopback-only control channel (`figcraft --control
 - **Its own renderer:** tiny-skia on every core for the canvas and exports, with layer blending, effects and masks; booleans from linesweeper, geometry from kurbo, text from skrifa and HarfRust.
 - **Runs in the browser:** the whole engine and UI compile to WebAssembly.
 - **Accessible:** screen readers get names, roles, values and states for the tools, layer rows, fields, dropdowns, tabs and menus (AccessKit on desktop), F6 moves the keyboard between the toolbar, layers, canvas and properties (Tab within them, Escape back to the canvas), the system's reduce-motion setting is honoured, and panel text meets WCAG AA contrast in both themes.
-- **Languages:** English and Spanish (a draft waiting for a native speaker's review), picked in Preferences or taken from the system or browser and switched live; adding a language is one catalog file ([`docs/translating.md`](docs/translating.md)).
-- **Plugins:** sandboxed WebAssembly plugins (a metered, pure-Rust interpreter with a memory cap and no file or network access, in the browser too) that act through the same commands, each run one undo step, within the permissions their manifest asks for. A Rust SDK and two example plugins are in [`plugins/`](plugins); see [`docs/plugins.md`](docs/plugins.md).
+- **Languages:** English, Russian and Turkish (reviewed by native speakers), and Spanish, French, German, Brazilian Portuguese, Japanese, Korean, Simplified Chinese, Czech, Indonesian and Georgian drafts, picked in Preferences or taken from the system or browser and switched live; adding a language is one catalog file ([`docs/translating.md`](docs/translating.md)).
+- **Plugins:** sandboxed WebAssembly plugins (a metered, pure-Rust interpreter with a memory cap and no file or network access, in the browser too) that act through the same commands, each run one undo step, within the permissions their manifest asks for. A Rust SDK and three example plugins are in [`plugins/`](plugins); see [`docs/plugins.md`](docs/plugins.md).
 - **Live sessions (preview):** share the open file from the app (Share ▸ Start sharing: online through a server, or on your local network), give the others the short join code it shows (or the invite link), and edit it together: everyone's changes sync live, with cursors, selections, avatars and follow, and undo takes back only your own changes. Others join from the desktop app (invite links open it) or from the browser build. See [`docs/collab-protocol.md`](docs/collab-protocol.md).
 - **A server of your own (preview):** `figcraft-server` keeps a team's files, publishes them from the app (File ▸ Publish to server…, or Share ▸ Online with your server in Preferences) and hands out share links and join codes that let people edit or only view; files survive restarts and apps reconnect where they were. No accounts yet: links are the access. Releases ship it for Linux, and the desktop app joins over `wss://`; [hosting it on a rented Linux server](docs/server.md#deploy-on-a-linux-server) takes a systemd unit and Caddy or nginx (or Docker). See [`docs/server.md`](docs/server.md).
 - **Never crashes:** no `unwrap`, `expect` or `panic` in shipped code, enforced by clippy; commands run behind a guard so a bug fails one action, not your session.
@@ -251,6 +251,8 @@ Fonts for the UI and the Text tool come from [craft-fonts](https://github.com/st
 git clone https://github.com/storytold/craft-fonts ../craft-fonts
 ```
 
+If you clone it after a first build, run `cargo clean -p figcraft-text` once so the next build embeds the fonts.
+
 **Start from a template.** The home screen's Templates tab has eight starter files (a mobile app, a landing page, a dashboard, a design system starter, a wireframe kit, social post sizes, presentation slides and an icon set starter), also under File ▸ New from template…. They are built in code from original, synthetic content, so scripts and agents can open them too: `file.newFromTemplate {template}` ([`docs/mcp.md`](docs/mcp.md#starter-templates)).
 
 For the web build, install [trunk](https://trunkrs.dev/) and run `cargo xtask wasm`.
@@ -260,7 +262,7 @@ New contributors and AI agents: start with [`AGENTS.md`](AGENTS.md), then [`docs
 Installers for macOS (universal, signed and notarized), Windows (x64, x86 and arm64), Linux (AppImage, `.deb`, `.rpm`, Flatpak and tarball), FreeBSD and the web are attached to each [GitHub release](https://github.com/storytold/figcraft/releases). Maintainers: [`docs/releasing.md`](docs/releasing.md) explains how releases are built, signed and published.
 
 > [!IMPORTANT]
-> **Status:** FigCraft is in **alpha**: about 49% of the way to replacing Figma for real work, by our own estimate. Nearly all of Figma's main menu is wired ([`docs/parity-checklist.md`](docs/parity-checklist.md)) and the core editor works end to end, but FigCraft opens `.fig` files only best effort, has only a first preview of multiplayer (live sessions hosted from the app or a self-hosted server, with per-person undo and share links to edit or to view; no accounts, teams or cloud yet), runs its own WebAssembly plugins rather than Figma's, and hasn't been checked against real Figma documents. The honest, area-by-area picture is in the [roadmap](ROADMAP.md) and [`docs/target-app-parity.md`](docs/target-app-parity.md). Expect rough edges and please file issues, or tell us what broke on [Discord](https://discord.gg/artcraft).
+> **Status:** FigCraft is in **alpha**: about 49% of the way to replacing proprietary tools for real work, by our own estimate. Nearly all tracked interface design actions in the menu checklist are wired ([`docs/parity-checklist.md`](docs/parity-checklist.md)) and the core editor works end to end, but FigCraft opens `.fig` files only best effort, has only a first preview of multiplayer (live sessions hosted from the app or a self-hosted server, with per-person undo and share links to edit or to view; no accounts, teams or cloud yet), runs its own WebAssembly plugins, and hasn't been checked against real design documents. The honest, area-by-area picture is in the [roadmap](ROADMAP.md) and [`docs/target-app-parity.md`](docs/target-app-parity.md). Expect rough edges and please file issues, or tell us what broke on [Discord](https://discord.gg/artcraft).
 
 ## Privacy and online sharing
 
@@ -345,8 +347,6 @@ The ArtCraft name, wordmark and logos in [`docs/brand/`](docs/brand/) are tradem
 ArtCraft Team and are not covered by this license. They may be used only unmodified, and only as
 part of this repository and FigCraft, under [`docs/brand/LICENSE-brand.txt`](docs/brand/LICENSE-brand.txt).
 Forks and modified versions must remove them.
-
-<sub>Figma is a trademark of Figma, Inc. FigCraft is an independent, open-source project and is not affiliated with, sponsored by or endorsed by Figma, Inc.; the name is used only to describe the workflows FigCraft is compatible with.</sub>
 
 <p align="center">
   <a href="https://getartcraft.com/"><img alt="ArtCraft" src="https://raw.githubusercontent.com/storytold/vectorcraft/main/docs/brand/artcraft-mark.png" width="28"></a><br>

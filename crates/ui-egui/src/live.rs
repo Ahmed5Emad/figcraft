@@ -13,10 +13,11 @@
 //! and it fades a few seconds after the last change (frames are asked for only until then).
 //! Spotlight: your avatar's menu asks everyone to follow you; a banner says so and stops it.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use egui::{Align2, Color32, CornerRadius, Pos2, Rect, Sense, Shape, Stroke, Ui, pos2, vec2};
-use figcraft_engine::live::{Access, PEOPLE, Role, SessionId, Share, Signal, Status, Via, initials, parse_color, presence_page};
+use figcraft_engine::live::{Access, PEOPLE, Role, SessionId, Share, Signal, Status, TOO_LARGE_TO_JOIN, Via, initials, parse_color, presence_page};
 use serde_json::{Value, json};
 
 use crate::FigApp;
@@ -444,7 +445,8 @@ fn follow_frame(painter: &egui::Painter, canvas: Rect, name: &str, fill: Color32
 }
 
 /// You and the others at the top of the right panel, within `area`: click someone to follow
-/// them (again to stop); the chevron lists everyone.
+/// them (again to stop); right-click them to remove them from the session (when you host it or
+/// own the file); the chevron lists everyone.
 pub fn people_bar(app: &mut FigApp, ui: &mut Ui, area: Rect) {
     let t = Tokens::get(ui.ctx());
     const R: f32 = 12.0;
@@ -459,6 +461,8 @@ pub fn people_bar(app: &mut FigApp, ui: &mut Ui, area: Rect) {
     let peers: Vec<(u32, String, Color32)> = live.peers.values().map(|p| (p.client_id, p.name.clone(), color(&p.color))).collect();
     let follow = live.follow;
     let (in_session, spotlighting) = (live.status == Status::Live, live.spotlighting);
+    let can_remove = figcraft_engine::live::can_remove_people(&app.session);
+    let mut remove = None;
     // Room for the avatars after yours and the chevron.
     let fit = (((area.width() - 2.0 * R - 18.0) / STEP).floor() as usize).max(1);
     let (show, more) = if peers.len() > fit { (fit - 1, peers.len() - (fit - 1)) } else { (peers.len(), 0) };
@@ -495,6 +499,14 @@ pub fn people_bar(app: &mut FigApp, ui: &mut Ui, area: Rect) {
         }
         if resp.clicked() {
             clicked = Some(*id);
+        }
+        if can_remove {
+            crate::right::context_popup(&resp).show(|ui| {
+                if menu_item(ui, &trf("Remove {name} from session", &[("name", name)]), "") {
+                    remove = Some(*id);
+                    ui.close();
+                }
+            });
         }
     }
     if more > 0 {
@@ -539,6 +551,10 @@ pub fn people_bar(app: &mut FigApp, ui: &mut Ui, area: Rect) {
     if spotlight {
         app.run("collab.spotlight", json!({"on": !spotlighting}));
     }
+    // A server is asked without the window waiting for it.
+    if let Some(id) = remove {
+        app.run_background(&ui.ctx().clone(), "collab.removePerson", json!({"client": id}), Box::new(|_, _, _| {}));
+    }
 }
 
 /// The Share button's popover: the live session (start, invite link, stop or leave) and export.
@@ -580,7 +596,7 @@ pub fn share_popover(app: &mut FigApp, anchor: &egui::Response) {
                 (Status::Reconnecting { attempt }, _) => {
                     (trf("Connection lost, reconnecting (attempt {attempt})…", &[("attempt", attempt)]), t.text_secondary)
                 }
-                (Status::Failed { .. }, _) => (status.label(), t.danger),
+                (Status::Failed { reason }, _) => (failure_text(reason).into_owned(), t.danger),
                 _ => (tr(&status.label()).to_string(), t.text_secondary),
             };
             if !line.is_empty() {
@@ -680,9 +696,16 @@ pub fn join_field(app: &mut FigApp, ui: &mut Ui, typed: &mut String, id: egui::I
 pub fn join_status(app: &FigApp, ui: &mut Ui, t: &Tokens, session: SessionId) {
     match app.session.live.get(session).map(|l| &l.status) {
         Some(Status::Connecting) => widgets::label(ui, tr("Joining…"), t.text_secondary),
-        Some(Status::Failed { reason }) => widgets::label(ui, reason, t.danger),
+        Some(Status::Failed { reason }) => widgets::label(ui, &failure_text(reason), t.danger),
         _ => {}
     }
+}
+
+/// Why a live session failed, in the UI language when it is a reason the UI knows (the transport's
+/// English otherwise).
+pub(crate) fn failure_text(reason: &str) -> Cow<'_, str> {
+    let mb = TOO_LARGE_TO_JOIN.split_once("{mb}").and_then(|(before, after)| reason.strip_prefix(before)?.strip_suffix(after));
+    mb.map_or(Cow::Borrowed(reason), |mb| Cow::Owned(trf(TOO_LARGE_TO_JOIN, &[("mb", &mb)])))
 }
 
 /// Not in a session: your name, how to share (online or on the local network), start; or join
@@ -987,6 +1010,7 @@ fn report_ui(app: &mut FigApp, ui: &mut Ui, t: &Tokens) {
             .id(egui::Id::new("live_report_reason")),
     );
     a11y::text(&resp, tr("Report"), &reason);
+    crate::widgets::select_all_on_focus(ui, &resp, &reason);
     if std::mem::take(&mut app.ui.live.focus_report) {
         resp.request_focus();
     }
@@ -1031,12 +1055,14 @@ pub fn open_join(app: &mut FigApp, link: &str) {
     app.ui.live.focus_join = true;
 }
 
-/// An invite link the app was opened with (`figcraft figcraft://join?…`): join at once; a link
-/// that can't be used shows in the Join dialog with the reason.
+/// An invite link the app was opened with (`figcraft figcraft://join?…`): the Join dialog opens
+/// with the link filled in, so joining is the person's own choice.
+///
+/// The system hands the app any `figcraft://` link that is followed, which may be a page, a
+/// message or a document rather than something the person meant to act on, so the link is shown
+/// and confirmed rather than acted on.
 pub fn open_invite(app: &mut FigApp, link: &str) {
-    if app.run("collab.join", json!({"link": link.trim()})).is_none() {
-        open_join(app, link.trim());
-    }
+    open_join(app, link.trim());
 }
 
 /// Escape closes the Join or Publish dialog (before the canvas's shortcuts see it: it doesn't
@@ -1148,6 +1174,7 @@ pub fn publish_dialog(app: &mut FigApp, ctx: &egui::Context) {
         );
         // The address may carry the server key: it isn't read out.
         a11y::text(&resp, tr("Server address"), "");
+        crate::widgets::select_all_on_focus(ui, &resp, &form.server);
         if focus {
             resp.request_focus();
         }
@@ -1177,6 +1204,7 @@ pub fn publish_dialog(app: &mut FigApp, ctx: &egui::Context) {
         widgets::label(ui, tr("File name"), t.text_secondary);
         let nresp = ui.add(egui::TextEdit::singleline(&mut form.name).desired_width(380.0).id(egui::Id::new("live_publish_name")));
         a11y::text(&nresp, tr("File name"), &form.name);
+        crate::widgets::select_all_on_focus(ui, &nresp, &form.name);
         go |= nresp.lost_focus() && enter(ui) && (keyed || open_server);
         ui.add_space(4.0);
         ui.horizontal(|ui| {

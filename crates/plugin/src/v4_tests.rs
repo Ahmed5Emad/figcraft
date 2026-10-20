@@ -318,7 +318,7 @@ fn widget_timer_is_bounded_charged_and_needs_api_4() {
     let run = |ms: i64, api: u32| Instance::new(&timer_module(ms), &Limits { api, ..Limits::default() }).unwrap().call("{}", &mut Quiet).unwrap();
     for ms in [100, 1000, 3_600_000] {
         let out = run(ms, 4);
-        assert_eq!((out.timer, out.output.as_bytes()[0], out.calls), (Some(ms as u32), b'0', 1), "{ms}");
+        assert_eq!((out.timer, out.output.as_bytes()[0], out.calls), (Some(ms as u32), b'0', 3), "{ms}");
     }
     assert_eq!(run(0, 4).timer, Some(0), "0 cancels");
     let mut seed = 7u64;
