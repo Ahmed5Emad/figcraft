@@ -192,7 +192,7 @@ fn a_preferences_file_that_is_junk_never_stops_the_app_starting() {
 
 #[test]
 fn after_a_crash_unsaved_documents_come_back_beside_the_restored_tabs_and_a_quit_keeps_none() {
-    let dir = root("crash");
+    let dir = root("crash-restore");
     let recovery = dir.join("Recovery");
     let paths = left_open(&dir, &["A"]);
     // The run had A open with a change that wasn't saved, and a document never saved.
