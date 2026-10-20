@@ -270,10 +270,10 @@ pub fn adopt(app: &mut FigApp, id: u64, uids: &[u64], front: Option<u64>) {
         w.docs.retain(|u| !uids.contains(u));
     }
     if id == 0 {
-        if let Some(f) = front {
-            if let Some(i) = app.session.docs.iter().position(|d| d.uid == f) {
-                app.session.active = i;
-            }
+        if let Some(f) = front
+            && let Some(i) = app.session.docs.iter().position(|d| d.uid == f)
+        {
+            app.session.active = i;
         }
     } else if let Some(w) = app.windows.list.iter_mut().find(|w| w.id == id) {
         for u in uids {
