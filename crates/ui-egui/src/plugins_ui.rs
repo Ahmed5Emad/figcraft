@@ -160,7 +160,7 @@ pub fn menu(app: &mut FigApp, ui: &mut Ui, t: &Tokens) -> bool {
                 }
             }
             commands => {
-                let picked = crate::menus::submenu(ui, "Plugins", &format!("Plugins/plugin:{}", m.id), &m.name, t, |ui| {
+                let picked = crate::menus::submenu(ui, &format!("Plugins/plugin:{}", m.id), &m.name, t, |ui| {
                     commands.iter().find(|c| crate::menus::item(ui, &c.label, "", true, false, t)).map(|c| c.id.clone())
                 });
                 if let Some(c) = picked {
@@ -173,7 +173,7 @@ pub fn menu(app: &mut FigApp, ui: &mut Ui, t: &Tokens) -> bool {
         app.session.prefs.plugins.iter().filter(|p| p.manifest.widget).map(|p| (p.manifest.id.as_str(), p.manifest.name.as_str())).collect();
     let widget = (!widgets.is_empty())
         .then(|| {
-            crate::menus::submenu(ui, "Plugins", "Plugins/widgets", tr("Widgets"), t, |ui| {
+            crate::menus::submenu(ui, "Plugins/widgets", tr("Widgets"), t, |ui| {
                 widgets.iter().find(|(_, name)| crate::menus::item(ui, name, "", true, false, t)).map(|(id, _)| id.to_string())
             })
         })
@@ -754,8 +754,14 @@ fn grid(ui: &mut Ui, salt: Id, p: &Param, values: &Map<String, Value>, t: &Token
                         Some(texture) => {
                             let inner = rect.shrink(7.0);
                             let s = texture.size_vec2();
-                            let shown = egui::Rect::from_center_size(inner.center(), s * (inner.width() / s.x.max(1.0)).min(inner.height() / s.y.max(1.0)));
-                            ui.painter().image(texture.id(), shown, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                            let shown =
+                                egui::Rect::from_center_size(inner.center(), s * (inner.width() / s.x.max(1.0)).min(inner.height() / s.y.max(1.0)));
+                            ui.painter().image(
+                                texture.id(),
+                                shown,
+                                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                egui::Color32::WHITE,
+                            );
                         }
                         None => {
                             ui.painter().rect_filled(rect.shrink(7.0), egui::CornerRadius::same(4), t.field);

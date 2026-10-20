@@ -165,8 +165,16 @@ pub(crate) fn snapshot(app: &FigApp) -> SavedSession {
             panel_widths: Some([ui.left_width, ui.right_width]),
         }
     };
-    let main = window(0, &wins.main, &app.ui, app.session.ds().ok().map(|d| d.uid));
-    let others = wins.list.iter().map(|w| window(w.id, &w.geo, &w.pane.ui, w.active)).filter(|w| !w.tabs.is_empty());
+    let main = window(0, &app.restore.main_geo, &app.ui, app.session.ds().ok().map(|d| d.uid));
+    let others = wins
+        .list
+        .iter()
+        .map(|w| {
+            // Other windows keep their place, size and state.
+            let geo = Geometry { pos: w.pos, size: w.size, maximized: w.maximized, fullscreen: w.fullscreen };
+            window(w.id, &geo, &w.pane.ui, w.active)
+        })
+        .filter(|w| !w.tabs.is_empty());
     SavedSession { windows: std::iter::once(main).chain(others).take(figcraft_engine::restore::MAX_WINDOWS).collect() }
 }
 
@@ -220,6 +228,8 @@ pub struct Restore {
     next_write: f64,
     /// When (UI clock) the restore under way counts as done (the app's crash guard goes then).
     settles: Option<f64>,
+    /// Where the main window is, followed every frame it draws (session restore keeps it).
+    pub(crate) main_geo: Geometry,
 }
 
 impl FigApp {
@@ -299,7 +309,7 @@ fn apply(app: &mut FigApp, ctx: &Context, placed: Vec<Placed>) {
         any |= !p.docs.is_empty();
         let geo = Geometry::of(&p.saved, &app.monitors);
         if k == 0 {
-            let (root, now) = (ViewportId::ROOT, app.windows.main);
+            let (root, now) = (ViewportId::ROOT, app.restore.main_geo);
             let send = |cmd| ctx.send_viewport_cmd_to(root, cmd);
             // A window is placed while it is neither maximized nor full screen: it leaves a
             // state first and enters one last, and one it stays in keeps the place under it.
@@ -320,7 +330,7 @@ fn apply(app: &mut FigApp, ctx: &Context, placed: Vec<Placed>) {
             if geo.fullscreen && !now.fullscreen {
                 send(ViewportCommand::Fullscreen(true));
             }
-            app.windows.main = Geometry { pos: geo.pos.or(app.windows.main.pos), ..geo };
+            app.restore.main_geo = Geometry { pos: geo.pos.or(app.restore.main_geo.pos), ..geo };
             panels(&mut app.ui, &p.saved);
             app.session.prefs.panel_widths = (app.ui.left_width, app.ui.right_width);
             crate::windows::adopt(app, 0, &p.docs, p.front.filter(|_| !keep_front));
@@ -328,9 +338,9 @@ fn apply(app: &mut FigApp, ctx: &Context, placed: Vec<Placed>) {
             // Its tabs (none open yet) are the main window's.
             crate::windows::adopt(app, 0, &p.docs, None);
         } else {
-            let mut ui = UiState { title_bar: app.ui.title_bar, ..UiState::default() };
+            let mut ui = UiState { title_bar: app.ui.title_bar, pages_height: app.ui.pages_height, ..UiState::default() };
             panels(&mut ui, &p.saved);
-            let id = crate::windows::push(app, ui, geo);
+            let id = crate::windows::push(app, ui, geo.pos, geo.size, geo.maximized, geo.fullscreen);
             if let Some(w) = app.windows.list.last_mut() {
                 w.restored = Some(k);
             }

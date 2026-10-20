@@ -370,20 +370,13 @@ fn online_files_are_joined_again_and_take_their_place_when_they_arrive() {
 /// poll, or the later one first.
 #[test]
 fn two_online_tabs_of_one_window_keep_their_saved_order() {
-    let online =
-        |file: &str| SavedTab { server: Some(SERVER.into()), file: Some(file.into()), ..SavedTab::default() };
-    let order = |s: &Session| {
-        s.docs
-            .iter()
-            .map(|d| s.saved_tab(d).and_then(|t| t.path.or(t.file)).unwrap_or_default())
-            .collect::<Vec<_>>()
-    };
+    let online = |file: &str| SavedTab { server: Some(SERVER.into()), file: Some(file.into()), ..SavedTab::default() };
+    let order = |s: &Session| s.docs.iter().map(|d| s.saved_tab(d).and_then(|t| t.path.or(t.file)).unwrap_or_default()).collect::<Vec<_>>();
     let setup = || {
         let (dir, paths) = files("online-order", &["A"]);
         let saved = SavedSession { windows: vec![window(vec![tab(&paths[0]), online("f1"), online("f2")], 0)] };
         let mut s = run_with(saved);
-        s.prefs.online_files =
-            serde_json::from_value::<Prefs>(json!({"online_files": [record("f1"), record("f2")]})).unwrap().online_files;
+        s.prefs.online_files = serde_json::from_value::<Prefs>(json!({"online_files": [record("f1"), record("f2")]})).unwrap().online_files;
         let script = Arc::new(Mutex::new(Script::default()));
         s.live.install(Box::new(Link(script.clone())));
         let r = s.execute("session.restore", &json!({})).unwrap();

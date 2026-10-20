@@ -17,7 +17,6 @@ use serde_json::{Value, json};
 use crate::canvas::CanvasState;
 use crate::i18n::{tr, trf};
 use crate::render_worker::Worker;
-use crate::restore::Geometry;
 use crate::{FigApp, TitleBar, UiState};
 
 /// Another window: its tabs and the UI state it swaps into the app while it draws.
@@ -28,10 +27,13 @@ pub struct Window {
     /// The file it shows.
     pub(crate) active: Option<u64>,
     pub(crate) pane: Pane,
-    /// Where it opens, then where it is.
-    pub(crate) geo: Geometry,
-    /// Which window of the restored session it is: online files still on their way open in it
-    /// (and keep it open until they arrive, or can't).
+    /// Where it opens and its size, then where it is (screen points).
+    pub(crate) pos: Option<Pos2>,
+    pub(crate) size: Vec2,
+    /// Maximized or full-screen (placed back so on restore; read live for the main window).
+    pub(crate) maximized: bool,
+    pub(crate) fullscreen: bool,
+    /// The restored window it holds (`session.restore` placed windows), if any.
     pub(crate) restored: Option<usize>,
 }
 
@@ -53,8 +55,6 @@ pub struct Windows {
     pub current: u64,
     /// The window last in front: control requests without a `window` go to it.
     pub focused: u64,
-    /// Where the main window is.
-    pub(crate) main: Geometry,
     /// The main window's file while another window draws.
     main_active: Option<u64>,
     /// Windows to close (their files close with them), at the main window's next frame.
@@ -68,14 +68,13 @@ impl Windows {
         self.list.iter().find(|w| w.docs.contains(&uid)).map_or(0, |w| w.id)
     }
 
-    /// The window that is window `k` of the restored session (the main window when it is gone,
-    /// or never opened).
-    pub(crate) fn restored(&self, k: usize) -> u64 {
-        self.list.iter().find(|w| w.restored == Some(k)).map_or(0, |w| w.id)
-    }
-
     pub fn exists(&self, id: u64) -> bool {
         id == 0 || self.list.iter().any(|w| w.id == id)
+    }
+
+    /// The window holding restored window `k` (0: the main window).
+    pub fn restored(&self, k: usize) -> u64 {
+        self.list.iter().find(|w| w.restored == Some(k)).map_or(0, |w| w.id)
     }
 }
 
@@ -102,7 +101,9 @@ pub fn with_app<R>(f: impl FnOnce(&mut FigApp) -> R) -> Option<R> {
 /// Last-resort guard around a frame: a panic becomes a message and recovery copies of unsaved
 /// files, not a lost document.
 pub fn guard(app: &mut FigApp, ctx: &Context, f: impl FnOnce(&mut FigApp)) {
-    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut *app)));
+    // Started with automation roots, everything the window and the control channel do is confined.
+    let roots = app.automation_roots.clone();
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| figcraft_engine::file_access::confined(roots.as_ref(), || f(&mut *app))));
     if let Err(e) = res {
         let msg = e.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| e.downcast_ref::<String>().cloned()).unwrap_or_else(|| "panic".into());
         log::error!("UI panic: {msg}");
@@ -208,48 +209,83 @@ pub fn open(app: &mut FigApp, ctx: &Context, index: Option<usize>, path: Option<
     if let Some(why) = one {
         return Err(why.into());
     }
+    for w in &mut app.windows.list {
+        w.docs.retain(|u| *u != uid);
+    }
     let (outer, inner) = ctx.input(|i| (i.viewport().outer_rect, i.viewport().inner_rect));
-    // A new window opens like the one it comes from: the same tabs and panel widths.
-    let ui = UiState {
-        title_bar: app.ui.title_bar,
-        right_tab: app.ui.right_tab,
-        left_tab: app.ui.left_tab,
-        left_width: app.ui.left_width,
-        right_width: app.ui.right_width,
-        ..UiState::default()
-    };
-    let geo = Geometry {
+    app.windows.last_id += 1;
+    let id = app.windows.last_id;
+    app.windows.list.push(Window {
+        id,
+        docs: vec![uid],
+        active: Some(uid),
+        pane: Pane {
+            // A new window opens like the one it comes from: the same tabs, panel widths and pages
+            // list height.
+            ui: UiState {
+                title_bar: app.ui.title_bar,
+                right_tab: app.ui.right_tab,
+                left_tab: app.ui.left_tab,
+                left_width: app.ui.left_width,
+                right_width: app.ui.right_width,
+                pages_height: app.ui.pages_height,
+                ..UiState::default()
+            },
+            ..Pane::default()
+        },
         pos: at.or_else(|| outer.map(|r| r.min + Vec2::splat(32.0))),
-        size: inner.map_or(Geometry::default().size, |r| r.size()),
-        ..Geometry::default()
-    };
-    let id = push(app, ui, geo);
-    adopt(app, id, &[uid], Some(uid));
+        size: inner.map_or(Vec2::new(1280.0, 800.0), |r| r.size()),
+        maximized: false,
+        fullscreen: false,
+        restored: None,
+    });
     app.windows.focused = id;
     ctx.request_repaint_of(ViewportId::ROOT);
     Ok(id)
 }
 
-/// A new window with its panels as in `ui`, at `geo`, without files yet ([`adopt`]). Returns its id.
-pub(crate) fn push(app: &mut FigApp, ui: UiState, geo: Geometry) -> u64 {
+/// Open an empty window with this UI state at `pos`/`size`, placed back so (`session.restore`
+/// putting back a window): returns its id.
+pub fn push(app: &mut FigApp, ui: UiState, pos: Option<Pos2>, size: Vec2, maximized: bool, fullscreen: bool) -> u64 {
     app.windows.last_id += 1;
     let id = app.windows.last_id;
-    app.windows.list.push(Window { id, docs: Vec::new(), active: None, pane: Pane { ui, ..Pane::default() }, geo, restored: None });
+    app.windows.list.push(Window {
+        id,
+        docs: Vec::new(),
+        active: None,
+        pane: Pane { ui, ..Pane::default() },
+        pos,
+        size,
+        maximized,
+        fullscreen,
+        restored: None,
+    });
+    app.windows.focused = id;
     id
 }
 
-/// Open files `docs` become tabs of window `id` (0: the main window), which shows `front`.
-pub(crate) fn adopt(app: &mut FigApp, id: u64, docs: &[u64], front: Option<u64>) {
+/// Move open files `uids` (in order) into window `id` (0: the main window) and show `front`.
+pub fn adopt(app: &mut FigApp, id: u64, uids: &[u64], front: Option<u64>) {
     for w in &mut app.windows.list {
-        w.docs.retain(|u| !docs.contains(u));
-        if w.id == id {
-            w.docs.extend(docs);
-            w.active = front.or(w.active);
-        }
+        w.docs.retain(|u| !uids.contains(u));
     }
-    // The main window draws now: it shows the session's file.
-    if let Some(i) = front.filter(|_| id == 0).and_then(|u| app.session.docs.iter().position(|d| d.uid == u)) {
-        app.session.active = i;
+    if id == 0 {
+        if let Some(f) = front {
+            if let Some(i) = app.session.docs.iter().position(|d| d.uid == f) {
+                app.session.active = i;
+            }
+        }
+    } else if let Some(w) = app.windows.list.iter_mut().find(|w| w.id == id) {
+        for u in uids {
+            if !w.docs.contains(u) {
+                w.docs.push(*u);
+            }
+        }
+        if let Some(f) = front {
+            w.active = Some(f);
+        } else if !w.active.is_some_and(|a| w.docs.contains(&a)) {
+            w.active = w.docs.first().copied();
+        }
     }
 }
 
@@ -290,9 +326,7 @@ pub(crate) fn requests(app: &mut FigApp, ctx: &Context) {
     }
 }
 
-/// Every window: id, title, its files and the one it shows, where it is on screen (`rect`:
-/// `[x, y, width, height]` while neither maximized nor full screen) and the screen it is on
-/// (`window.list`).
+/// Every window: id, title, its files and the one it shows (`window.list`).
 pub fn list(app: &FigApp) -> Value {
     let active_of = |id: u64| -> Option<u64> {
         if id == app.windows.current {
@@ -308,7 +342,18 @@ pub fn list(app: &FigApp) -> Value {
         ids.map(|id| {
             let mine = |d: &&DocState| app.windows.of(d.uid) == id;
             let shown = app.session.docs.iter().filter(mine).find(|d| Some(d.uid) == active_of(id));
-            let geo = app.windows.list.iter().find(|w| w.id == id).map_or(&app.windows.main, |w| &w.geo);
+            let main_geo = app.restore.main_geo;
+            let other_geo;
+            let geo = if id == 0 {
+                &main_geo
+            } else {
+                let w = app.windows.list.iter().find(|w| w.id == id);
+                // Other windows keep their place, size and state.
+                let (pos, size, maximized, fullscreen) =
+                    w.map_or((None, Vec2::new(1280.0, 800.0), false, false), |w| (w.pos, w.size, w.maximized, w.fullscreen));
+                other_geo = crate::restore::Geometry { pos, size, maximized, fullscreen };
+                &other_geo
+            };
             let mut out = json!({
                 "id": id,
                 "main": id == 0,
@@ -338,7 +383,12 @@ pub fn on_close_request(app: &mut FigApp, ctx: &Context) {
     if app.windows.current == 0 && (unsaved || !app.windows.list.is_empty()) {
         ctx.send_viewport_cmd(ViewportCommand::CancelClose);
     }
-    if unsaved {
+    request_close(app, ctx);
+}
+
+/// The custom title bar's Close button uses the same unsaved-file check as a system close event.
+pub(crate) fn request_close(app: &mut FigApp, ctx: &Context) {
+    if !app.unsaved().is_empty() {
         app.ui.confirm_close = true;
         ctx.request_repaint();
     } else {
@@ -363,7 +413,7 @@ pub(crate) fn confirm_close(app: &mut FigApp, ctx: &Context) {
     }
     let t = crate::theme::Tokens::get(ctx);
     let (mut open, mut discard, mut cancel) = (true, false, false);
-    crate::dialogs::window(tr("Unsaved changes"), ctx).open(&mut open).show(ctx, |ui| {
+    crate::dialogs::window(tr("Unsaved changes"), ctx).order(egui::Order::Foreground).open(&mut open).show(ctx, |ui| {
         ui.set_width(340.0);
         crate::widgets::label(ui, &trf("Unsaved changes in {names}. Close the window and lose them?", &[("names", &names.join(", "))]), t.text);
         ui.add_space(12.0);
@@ -382,8 +432,6 @@ pub(crate) fn confirm_close(app: &mut FigApp, ctx: &Context) {
 /// (a window left with none closes) and the main window shows one of its own files.
 pub(crate) fn begin(app: &mut FigApp, ctx: &Context) {
     app.windows.current = 0;
-    app.windows.main.track(ctx);
-    crate::restore::begin(app, ctx);
     for id in std::mem::take(&mut app.windows.closing) {
         if id == 0 && app.windows.list.is_empty() {
             app.ui.quit = true;
@@ -403,10 +451,10 @@ pub(crate) fn begin(app: &mut FigApp, ctx: &Context) {
         // The main window takes over another window: its files, panels and place on screen.
         let mut w = app.windows.list.remove(0);
         exchange(app, &mut w.pane);
-        if let Some(p) = w.geo.pos {
+        if let Some(p) = w.pos {
             ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::OuterPosition(p));
         }
-        ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::InnerSize(w.geo.size));
+        ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::InnerSize(w.size));
         app.windows.focused = 0;
         show_own(app, w.active);
     }
@@ -414,9 +462,7 @@ pub(crate) fn begin(app: &mut FigApp, ctx: &Context) {
     for w in &mut app.windows.list {
         w.docs.retain(|u| open.contains(u));
     }
-    // A restored window whose online files are still on their way waits for them.
-    let waiting: Vec<usize> = app.session.restore.joining().map(|(k, _)| k).collect();
-    app.windows.list.retain(|w| !w.docs.is_empty() || w.restored.is_some_and(|k| waiting.contains(&k)));
+    app.windows.list.retain(|w| !w.docs.is_empty());
     if !app.windows.exists(app.windows.focused) {
         app.windows.focused = 0;
     }
@@ -424,6 +470,10 @@ pub(crate) fn begin(app: &mut FigApp, ctx: &Context) {
         app.windows.focused = 0;
     }
     show_own(app, None);
+    // Follow the main window for session restore, then put back the windows `session.restore`
+    // opened the tabs of (the frame draws with the main window's state).
+    app.restore.main_geo.track(ctx);
+    crate::restore::begin(app, ctx);
 }
 
 /// After a window drew: when a command showed another window's file (Ctrl+Tab, opening a file
@@ -458,12 +508,12 @@ pub(crate) fn show(app: &FigApp, ctx: &Context) {
         let title = title_of(app.session.docs.iter().find(|d| Some(d.uid) == w.active));
         let mut b = ViewportBuilder::default()
             .with_title(title)
-            .with_inner_size(w.geo.size)
+            .with_inner_size(w.size)
             .with_min_inner_size([800.0, 500.0])
-            .with_maximized(w.geo.maximized)
-            .with_fullscreen(w.geo.fullscreen)
+            .with_maximized(w.maximized)
+            .with_fullscreen(w.fullscreen)
             .with_drag_and_drop(true);
-        if let Some(p) = w.geo.pos {
+        if let Some(p) = w.pos {
             b = b.with_position(p);
         }
         b = match w.pane.ui.title_bar {
@@ -505,7 +555,7 @@ fn enter(app: &mut FigApp, id: u64) -> Option<Entered> {
 }
 
 /// Files the entered window opened are its own.
-fn adopt_entered(app: &mut FigApp, e: &Entered) {
+fn adopt_opened(app: &mut FigApp, e: &Entered) {
     let new: Vec<u64> = app.session.docs.iter().map(|d| d.uid).filter(|u| *u > e.newest && app.windows.of(*u) == 0).collect();
     if let Some(w) = app.windows.list.iter_mut().find(|w| w.id == e.id) {
         w.docs.extend(new);
@@ -519,8 +569,8 @@ fn leave(app: &mut FigApp, mut e: Entered, outer: Option<egui::Rect>, inner: Opt
     exchange(app, &mut e.pane);
     if let Some(w) = app.windows.list.iter_mut().find(|w| w.id == e.id) {
         w.active = shown.or(w.active);
-        w.geo.pos = outer.map(|r| r.min).or(w.geo.pos);
-        w.geo.size = inner.map_or(w.geo.size, |r| r.size());
+        w.pos = outer.map(|r| r.min).or(w.pos);
+        w.size = inner.map_or(w.size, |r| r.size());
         w.pane = e.pane;
     }
     app.windows.current = 0;
@@ -538,7 +588,7 @@ pub(crate) fn as_window<R>(app: &mut FigApp, id: u64, f: impl FnOnce(&mut FigApp
     }
     let e = enter(app, id)?;
     let r = f(app);
-    adopt_entered(app, &e);
+    adopt_opened(app, &e);
     leave(app, e, None, None);
     Some(r)
 }
@@ -556,7 +606,7 @@ fn draw(app: &mut FigApp, id: u64, ui: &mut egui::Ui) {
     app.logic(&ctx);
     // Within the swap, so a panic leaves every window its own state.
     guard(app, &ctx, |app| app.frame(ui));
-    adopt_entered(app, &e);
+    adopt_opened(app, &e);
     settle(app, &ctx, files_before);
     if app.session.prefs != prefs {
         repaint_others(app, &ctx);
