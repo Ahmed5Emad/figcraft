@@ -17,6 +17,14 @@ fn files_and_the_control_port() {
 }
 
 #[test]
+fn fresh_starts_without_restoring() {
+    assert!(!parse(&args(&[])).fresh);
+    let a = parse(&args(&["--fresh", "a.figcraft"]));
+    assert!(a.fresh);
+    assert_eq!(a.files, args(&["a.figcraft"]));
+}
+
+#[test]
 fn the_control_port_accepts_the_equals_form() {
     let a = parse(&args(&["--control=7980", "a.figcraft"]));
     assert_eq!(a, Args { control: Some(7980), files: args(&["a.figcraft"]), ..Args::default() });
